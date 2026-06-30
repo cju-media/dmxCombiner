@@ -1,0 +1,26 @@
+{
+  "name": "dmxcombiner",
+  "version": "1.0.0",
+  "description": "",
+  "homepage": "https://github.com/cju-media/dmxCombiner#readme",
+  "bugs": {
+    "url": "https://github.com/cju-media/dmxCombiner/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cju-media/dmxCombiner.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "dmxnet": "^0.9.0",
+    "express": "^5.2.1",
+    "sacn": "^4.6.2",
+    "socket.io": "^4.8.3"
+  }
+}

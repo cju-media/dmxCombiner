@@ -1,120 +1,144 @@
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
 const { dmxnet } = require('dmxnet');
 const sacn = require('sacn');
+const path = require('path');
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+const PORT = 8500;
+
+// Serve static frontend files from /public directory
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ==========================================
-// CONFIGURATION
+// STATE MANAGEMENT & DATA BUFFERS
 // ==========================================
-const CONFIG = {
-    // Input configurations
-    inputA: { protocol: 'sacn', universe: 1 },    // Options: 'artnet' or 'sacn'
-    inputB: { protocol: 'artnet', universe: 2 },  // Options: 'artnet' or 'sacn'
-    
-    // Output configurations
+let CONFIG = {
+    inputA: { protocol: 'sacn', universe: 1 },
+    inputB: { protocol: 'artnet', universe: 2 },
     output: {
         artnet: { net: 0, subnet: 0, universe: 0, ip: '255.255.255.255' },
         sacn: { universe: 1 }
     }
 };
 
-// Internal buffers to hold the 512 channels for each source (0-255)
 let bufferA = new Uint8Array(512);
 let bufferB = new Uint8Array(512);
 
-// ==========================================
-// PROTOCOL INITIALIZATION
-// ==========================================
-
-// Initialize Art-Net Engine via dmxnet
-const artnetEngine = new dmxnet({
-    log: { level: 'info' },
-    oem: 0,
-    sane_sender: true
-});
-
-// Initialize sACN Receivers & Sender
-const sacnReceiver = new sacn.Receiver();
-const sacnSender = new sacn.Sender();
-
-// Create Art-Net Sender
-const artnetSender = artnetEngine.newSender({
-    ip: CONFIG.output.artnet.ip,
-    net: CONFIG.output.artnet.net,
-    subnet: CONFIG.output.artnet.subnet,
-    universe: CONFIG.output.artnet.universe
-});
+// Engine and dynamic socket references
+let artnetEngine = null;
+let artnetSender = null;
+let sacnSender = null;
+let activeArtnetReceivers = [];
+let activeSacnReceivers = [];
 
 // ==========================================
-// CORE MERGE & OUTPUT LOGIC
+// DMX CORE PROCESSING & ROUTING MATRIX
 // ==========================================
+function initDMXCore() {
+    // 1. Tidy up and close existing sockets to prevent port binding collisions
+    activeArtnetReceivers = [];
+    activeSacnReceivers.forEach(rx => {
+        try { rx.close(); } catch(e) { console.error("Error closing sACN stream:", e); }
+    });
+    activeSacnReceivers = [];
+
+    if (sacnSender) {
+        // No explicit close for sender required by library, let GC handle re-assignment
+        sacnSender = null;
+    }
+
+    // 2. Spin up fresh protocol engine instances
+    artnetEngine = new dmxnet({ log: { level: 'error' }, sane_sender: true });
+    sacnSender = new sacn.Sender({ universe: parseInt(CONFIG.output.sacn.universe) });
+
+    // 3. Configure Output Art-Net Sender destination
+    artnetSender = artnetEngine.newSender({
+        ip: CONFIG.output.artnet.ip,
+        net: parseInt(CONFIG.output.artnet.net),
+        subnet: parseInt(CONFIG.output.artnet.subnet),
+        universe: parseInt(CONFIG.output.artnet.universe)
+    });
+
+    // 4. Bind decoupled Input Streams
+    setupInputStream(CONFIG.inputA, bufferA);
+    setupInputStream(CONFIG.inputB, bufferB);
+}
+
+function setupInputStream(inputConfig, targetBuffer) {
+    const targetUniverse = parseInt(inputConfig.universe);
+
+    if (inputConfig.protocol === 'artnet') {
+        const rx = artnetEngine.newReceiver({ universe: targetUniverse });
+        rx.on('data', (data) => {
+            for(let i = 0; i < Math.min(data.length, 512); i++) {
+                targetBuffer[i] = data[i];
+            }
+            processAndTransmit();
+        });
+        activeArtnetReceivers.push(rx);
+    } else if (inputConfig.protocol === 'sacn') {
+        // Instantiate passing options block wrapper to satisfy destructuring contract
+        const rx = new sacn.Receiver({ universes: [targetUniverse] });
+        
+        rx.on('packet', (packet) => {
+            if (packet.universe === targetUniverse) {
+                for(let i = 0; i < 512; i++) {
+                    targetBuffer[i] = packet.payload[i] || 0;
+                }
+                processAndTransmit();
+            }
+        });
+        activeSacnReceivers.push(rx);
+    }
+}
+
 function processAndTransmit() {
     const mergedData = new Uint8Array(512);
 
+    // Dynamic linear adding with absolute value cap at 255
     for (let i = 0; i < 512; i++) {
-        // HTP (Highest Takes Precedence) or Additive. 
-        // This implements Additive with a 255 ceiling:
-        const combined = bufferA[i] + bufferB[i];
-        mergedData[i] = Math.min(combined, 255);
+        mergedData[i] = Math.min(bufferA[i] + bufferB[i], 255);
     }
-
-    // Convert TypedArray to standard Array/Buffer expected by the libraries
     const outputArray = Array.from(mergedData);
 
-    // 1. Output to Art-Net
-    artnetSender.transmit(outputArray);
-
-    // 2. Output to sACN
-    sacnSender.send({
-        universe: CONFIG.output.sacn.universe,
-        payload: outputArray,
-        priority: 100
-    });
+    // Sync out to targets
+    if (artnetSender) artnetSender.transmit(outputArray);
+    if (sacnSender) {
+        sacnSender.send({
+            universe: parseInt(CONFIG.output.sacn.universe),
+            payload: outputArray,
+            priority: 100
+        });
+    }
 }
+
+// Kick off initial matrix state
+initDMXCore();
 
 // ==========================================
-// INPUT STREAM SETUP
+// SOCKET.IO CONTROL PIPE
 // ==========================================
+io.on('connection', (socket) => {
+    // Deliver baseline current config to new dashboard client
+    socket.emit('currentConfig', CONFIG);
 
-// Setup Input A
-if (CONFIG.inputA.protocol === 'artnet') {
-    const receiverA = artnetEngine.newReceiver({
-        universe: CONFIG.inputA.universe
+    // Process real-time update requests submitted from UI
+    socket.on('updateConfig', (newConfig) => {
+        console.log('🔄 Reloading Core Routing Engines Matrix...');
+        CONFIG = newConfig;
+        
+        // Dynamic re-binding execution
+        initDMXCore();
+        
+        // Push state update verification globally to all clients
+        io.emit('currentConfig', CONFIG);
     });
-    receiverA.on('data', (data) => {
-        // dmxnet provides data as an array; copy up to 512 values
-        for(let i = 0; i < Math.min(data.length, 512); i++) bufferA[i] = data[i];
-        processAndTransmit();
-    });
-} else if (CONFIG.inputA.protocol === 'sacn') {
-    sacnReceiver.join(CONFIG.inputA.universe);
-    sacnReceiver.on('packet', (packet) => {
-        if (packet.universe === CONFIG.inputA.universe) {
-            // sacn payload is a Buffer
-            for(let i = 0; i < 512; i++) bufferA[i] = packet.payload[i] || 0;
-            processAndTransmit();
-        }
-    });
-}
+});
 
-// Setup Input B
-if (CONFIG.inputB.protocol === 'artnet') {
-    const receiverB = artnetEngine.newReceiver({
-        universe: CONFIG.inputB.universe
-    });
-    receiverB.on('data', (data) => {
-        for(let i = 0; i < Math.min(data.length, 512); i++) bufferB[i] = data[i];
-        processAndTransmit();
-    });
-} else if (CONFIG.inputB.protocol === 'sacn') {
-    sacnReceiver.join(CONFIG.inputB.universe);
-    sacnReceiver.on('packet', (packet) => {
-        if (packet.universe === CONFIG.inputB.universe) {
-            for(let i = 0; i < 512; i++) bufferB[i] = packet.payload[i] || 0;
-            processAndTransmit();
-        }
-    });
-}
-
-console.log(`🚀 DMX Merger Engine Active.`);
-console.log(`📥 Input A: ${CONFIG.inputA.protocol.toUpperCase()} Universe ${CONFIG.inputA.universe}`);
-console.log(`📥 Input B: ${CONFIG.inputB.protocol.toUpperCase()} Universe ${CONFIG.inputB.universe}`);
-console.log(`📤 Outputting merged streams to Art-Net (U${CONFIG.output.artnet.universe}) & sACN (U${CONFIG.output.sacn.universe})`);
+server.listen(PORT, () => {
+    console.log(`🌐 Matrix Engine Control UI running at http://localhost:${PORT}`);
+});
