@@ -128,6 +128,30 @@ io.on('connection', (socket) => {
 
     // Process real-time update requests submitted from UI
     socket.on('updateConfig', (newConfig) => {
+        // Server-side validation to avoid feedback loops
+        const isLoop = (input) => {
+            if (input.protocol === 'sacn' && newConfig.output.sacn.universe === input.universe) {
+                return true;
+            }
+            if (input.protocol === 'artnet' &&
+                newConfig.output.artnet.universe === input.universe &&
+                newConfig.output.artnet.subnet === 0 &&
+                newConfig.output.artnet.net === 0) {
+                return true;
+            }
+            return false;
+        };
+
+        if (isLoop(newConfig.inputA)) {
+            socket.emit('configError', "Error: Input A creates a feedback loop with Output.");
+            return;
+        }
+
+        if (isLoop(newConfig.inputB)) {
+            socket.emit('configError', "Error: Input B creates a feedback loop with Output.");
+            return;
+        }
+
         console.log('🔄 Reloading Core Routing Engines Matrix...');
         CONFIG = newConfig;
         
