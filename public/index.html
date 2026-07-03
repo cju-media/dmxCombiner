@@ -20,6 +20,11 @@
         button:hover { background: #1d4ed8; }
         .status { font-size: 0.85rem; color: #10b981; display: inline-flex; align-items: center; gap: 0.35rem; margin-left: auto; }
         .header-wrap { display: flex; align-items: center; }
+        .button-group { display: flex; gap: 1rem; margin-top: 1.5rem; }
+        .button-secondary { background: #3f3f46; color: white; border: 1px solid #52525b; border-radius: 4px; padding: 0.75rem 1.5rem; font-weight: 600; cursor: pointer; transition: background 0.2s; font-size: 1rem; flex: 1; }
+        .button-secondary:hover { background: #52525b; }
+        #btnSubmit { flex: 2; }
+        #errorBox { background: #ef4444; color: white; padding: 1rem; border-radius: 4px; margin-bottom: 1.5rem; display: none; font-weight: 500; }
     </style>
 </head>
 <body>
@@ -28,6 +33,8 @@
             <h1>🎛️ DMX Matrix Matrix / Merger</h1>
             <div class="status">● System Live</div>
         </div>
+
+        <div id="errorBox"></div>
 
         <form id="configForm">
             <div class="grid">
@@ -102,7 +109,12 @@
                     </div>
                 </div>
             </div>
-            <button type="submit">Apply Dynamic Routing Configuration</button>
+            <div class="button-group">
+                <button type="button" class="button-secondary" id="btnSaveFile">Save Config to File</button>
+                <button type="button" class="button-secondary" id="btnLoadFile">Load Config from Disk</button>
+                <input type="file" id="fileLoadConfig" accept=".json" style="display: none;">
+                <button type="submit" id="btnSubmit">Apply Dynamic Routing Configuration</button>
+            </div>
         </form>
     </div>
 
@@ -136,6 +148,7 @@
 
         // Populate fields with active state when page loads
         socket.on('currentConfig', (config) => {
+            document.getElementById('errorBox').style.display = 'none';
             fields['inputA.protocol'].value = config.inputA.protocol;
             fields['inputA.universe'].value = config.inputA.universe;
             fields['inputB.protocol'].value = config.inputB.protocol;
@@ -156,10 +169,14 @@
             fields['output.artnet.universe'].value = config.output.artnet.universe;
         });
 
-        // Pack and ship changes upstream
-        form.addEventListener('submit', (e) => {
-            e.preventDefault();
-            const updatedConfig = {
+        socket.on('configError', (errorMsg) => {
+            const errorBox = document.getElementById('errorBox');
+            errorBox.textContent = errorMsg;
+            errorBox.style.display = 'block';
+        });
+
+        function getConfigFromForm() {
+            return {
                 inputA: {
                     protocol: fields['inputA.protocol'].value,
                     universe: parseInt(fields['inputA.universe'].value)
@@ -181,7 +198,83 @@
                     }
                 }
             };
+        }
+
+        // Pack and ship changes upstream
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const errorBox = document.getElementById('errorBox');
+            errorBox.style.display = 'none';
+
+            const updatedConfig = getConfigFromForm();
+
+            // Client-side validation to avoid feedback loops
+            const isLoop = (input) => {
+                const inUniv = parseInt(input.universe, 10);
+                if (input.protocol === 'sacn' && parseInt(updatedConfig.output.sacn.universe, 10) === inUniv) {
+                    return true;
+                }
+                if (input.protocol === 'artnet' &&
+                    parseInt(updatedConfig.output.artnet.universe, 10) === inUniv &&
+                    parseInt(updatedConfig.output.artnet.subnet, 10) === 0 &&
+                    parseInt(updatedConfig.output.artnet.net, 10) === 0) {
+                    // Receiver defaults to net 0, subnet 0. So if output matches universe, and net/subnet are 0, it's a loop.
+                    return true;
+                }
+                return false;
+            };
+
+            if (isLoop(updatedConfig.inputA)) {
+                errorBox.textContent = "Error: Input A creates a feedback loop with Output (same protocol and universe).";
+                errorBox.style.display = 'block';
+                return;
+            }
+
+            if (isLoop(updatedConfig.inputB)) {
+                errorBox.textContent = "Error: Input B creates a feedback loop with Output (same protocol and universe).";
+                errorBox.style.display = 'block';
+                return;
+            }
+
             socket.emit('updateConfig', updatedConfig);
+        });
+
+        // Save config to file
+        document.getElementById('btnSaveFile').addEventListener('click', () => {
+            const config = getConfigFromForm();
+            const blob = new Blob([JSON.stringify(config, null, 4)], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = "dmx-config.json";
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        });
+
+        // Load config from file
+        const fileInput = document.getElementById('fileLoadConfig');
+        document.getElementById('btnLoadFile').addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length === 0) return;
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                try {
+                    const loadedConfig = JSON.parse(event.target.result);
+                    // Push straight to server, server will echo back and update UI
+                    socket.emit('updateConfig', loadedConfig);
+                } catch (err) {
+                    alert("Error parsing JSON file: " + err.message);
+                }
+                // Reset input
+                fileInput.value = "";
+            };
+            reader.readAsText(file);
         });
     </script>
 </body>
