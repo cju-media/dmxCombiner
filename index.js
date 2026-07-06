@@ -69,7 +69,7 @@ function initDMXCore() {
     activeSacnReceivers = [];
 
     if (sacnSender) {
-        // No explicit close for sender required by library, let GC handle re-assignment
+        try { sacnSender.close(); } catch(e) { console.error("Error closing sACN sender:", e); }
         sacnSender = null;
     }
 
@@ -130,7 +130,7 @@ function setupInputStream(inputConfig, targetBuffer) {
         activeArtnetReceivers.push(rx);
     } else if (inputConfig.protocol === 'sacn') {
         // Instantiate passing options block wrapper to satisfy destructuring contract
-        const rx = new sacn.Receiver({ universes: [targetUniverse] });
+        const rx = new sacn.Receiver({ universes: [targetUniverse], reuseAddr: true });
         
         rx.on('packet', (packet) => {
             if (packet.universe === targetUniverse) {
