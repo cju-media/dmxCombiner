@@ -23,6 +23,7 @@ let CONFIG = {
     inputA: { protocol: 'sacn', universe: 1 },
     inputB: { protocol: 'artnet', universe: 2 },
     output: {
+        protocol: 'artnet',
         artnet: { target_type: 'specific', net: 0, subnet: 0, universe: 0, ip: '255.255.255.255' },
         sacn: { universe: 1 }
     }
@@ -32,7 +33,14 @@ let CONFIG = {
 try {
     if (fs.existsSync(CONFIG_FILE)) {
         const savedConfig = fs.readFileSync(CONFIG_FILE, 'utf8');
-        CONFIG = { ...CONFIG, ...JSON.parse(savedConfig) };
+        const parsed = JSON.parse(savedConfig);
+        CONFIG = { ...CONFIG, ...parsed };
+        if (parsed.output) {
+            CONFIG.output = { ...CONFIG.output, ...parsed.output };
+            if (!CONFIG.output.protocol) {
+                CONFIG.output.protocol = 'artnet'; // Backward compatibility
+            }
+        }
         console.log('✅ Loaded saved configuration from config.json');
     }
 } catch (err) {
@@ -67,30 +75,34 @@ function initDMXCore() {
 
     // 2. Spin up fresh protocol engine instances
     artnetEngine = new dmxnet({ log: { level: 'error' }, sane_sender: true });
-    sacnSender = new sacn.Sender({ universe: parseInt(CONFIG.output.sacn.universe) });
+    if (CONFIG.output.protocol === 'sacn') {
+        sacnSender = new sacn.Sender({ universe: parseInt(CONFIG.output.sacn.universe) });
+    }
 
     // 3. Configure Output Art-Net Sender destinations
     artnetSenders = [];
-    if (CONFIG.output.artnet.target_type === 'all') {
-        // Broadcast on all available network interfaces
-        if (artnetEngine.ip4 && artnetEngine.ip4.length > 0) {
-            artnetEngine.ip4.forEach(interfaceInfo => {
-                artnetSenders.push(artnetEngine.newSender({
-                    ip: interfaceInfo.broadcast,
-                    net: parseInt(CONFIG.output.artnet.net),
-                    subnet: parseInt(CONFIG.output.artnet.subnet),
-                    universe: parseInt(CONFIG.output.artnet.universe)
-                }));
-            });
+    if (CONFIG.output.protocol === 'artnet') {
+        if (CONFIG.output.artnet.target_type === 'all') {
+            // Broadcast on all available network interfaces
+            if (artnetEngine.ip4 && artnetEngine.ip4.length > 0) {
+                artnetEngine.ip4.forEach(interfaceInfo => {
+                    artnetSenders.push(artnetEngine.newSender({
+                        ip: interfaceInfo.broadcast,
+                        net: parseInt(CONFIG.output.artnet.net),
+                        subnet: parseInt(CONFIG.output.artnet.subnet),
+                        universe: parseInt(CONFIG.output.artnet.universe)
+                    }));
+                });
+            }
+        } else {
+            // Specific IP Target
+            artnetSenders.push(artnetEngine.newSender({
+                ip: CONFIG.output.artnet.ip,
+                net: parseInt(CONFIG.output.artnet.net),
+                subnet: parseInt(CONFIG.output.artnet.subnet),
+                universe: parseInt(CONFIG.output.artnet.universe)
+            }));
         }
-    } else {
-        // Specific IP Target
-        artnetSenders.push(artnetEngine.newSender({
-            ip: CONFIG.output.artnet.ip,
-            net: parseInt(CONFIG.output.artnet.net),
-            subnet: parseInt(CONFIG.output.artnet.subnet),
-            universe: parseInt(CONFIG.output.artnet.universe)
-        }));
     }
 
     // 4. Bind decoupled Input Streams
@@ -99,11 +111,17 @@ function initDMXCore() {
 }
 
 function setupInputStream(inputConfig, targetBuffer) {
+    if (inputConfig.protocol === 'off') {
+        targetBuffer.fill(0);
+        return;
+    }
+
     const targetUniverse = parseInt(inputConfig.universe);
 
     if (inputConfig.protocol === 'artnet') {
         const rx = artnetEngine.newReceiver({ universe: targetUniverse });
         rx.on('data', (data) => {
+            console.log("Received Art-Net data on universe " + targetUniverse);
             for(let i = 0; i < Math.min(data.length, 512); i++) {
                 targetBuffer[i] = data[i];
             }
@@ -116,6 +134,7 @@ function setupInputStream(inputConfig, targetBuffer) {
         
         rx.on('packet', (packet) => {
             if (packet.universe === targetUniverse) {
+                console.log("Received sACN data on universe " + targetUniverse);
                 for(let i = 0; i < 512; i++) {
                     targetBuffer[i] = packet.payload[i] || 0;
                 }
@@ -136,8 +155,9 @@ function processAndTransmit() {
     const outputArray = Array.from(mergedData);
 
     // Sync out to targets
-    artnetSenders.forEach(sender => sender.transmit(outputArray));
-    if (sacnSender) {
+    if (CONFIG.output.protocol === 'artnet') {
+        artnetSenders.forEach(sender => sender.transmit(outputArray));
+    } else if (CONFIG.output.protocol === 'sacn' && sacnSender) {
         sacnSender.send({
             universe: parseInt(CONFIG.output.sacn.universe),
             payload: outputArray,
@@ -160,11 +180,13 @@ io.on('connection', (socket) => {
     socket.on('updateConfig', (newConfig) => {
         // Server-side validation to avoid feedback loops
         const isLoop = (input) => {
+            if (input.protocol === 'off') return false;
+
             const inUniv = parseInt(input.universe, 10);
-            if (input.protocol === 'sacn' && parseInt(newConfig.output.sacn.universe, 10) === inUniv) {
+            if (input.protocol === 'sacn' && newConfig.output.protocol === 'sacn' && parseInt(newConfig.output.sacn.universe, 10) === inUniv) {
                 return true;
             }
-            if (input.protocol === 'artnet' &&
+            if (input.protocol === 'artnet' && newConfig.output.protocol === 'artnet' &&
                 parseInt(newConfig.output.artnet.universe, 10) === inUniv &&
                 parseInt(newConfig.output.artnet.subnet, 10) === 0 &&
                 parseInt(newConfig.output.artnet.net, 10) === 0) {
