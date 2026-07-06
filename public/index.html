@@ -160,6 +160,34 @@
             }
         });
 
+        socket.on('systemState', (state) => {
+            if (state.artnetAvailable === false) {
+                const disableArtNetOption = (selectElement) => {
+                    const option = selectElement.querySelector('option[value="artnet"]');
+                    if (option) {
+                        option.disabled = true;
+                        option.textContent = "Art-Net port not available, use SACN";
+                    }
+                };
+
+                disableArtNetOption(fields['output.protocol']);
+                disableArtNetOption(fields['inputA.protocol']);
+                disableArtNetOption(fields['inputB.protocol']);
+
+                // If they were already selected, force them to SACN (or Off for inputs)
+                if (fields['output.protocol'].value === 'artnet') {
+                    fields['output.protocol'].value = 'sacn';
+                    fields['output.protocol'].dispatchEvent(new Event('change'));
+                }
+                if (fields['inputA.protocol'].value === 'artnet') {
+                    fields['inputA.protocol'].value = 'off';
+                }
+                if (fields['inputB.protocol'].value === 'artnet') {
+                    fields['inputB.protocol'].value = 'off';
+                }
+            }
+        });
+
         // Populate fields with active state when page loads
         socket.on('currentConfig', (config) => {
             const errorBox = document.getElementById('errorBox');

@@ -5,6 +5,7 @@ const { dmxnet } = require('dmxnet');
 const sacn = require('sacn');
 const path = require('path');
 const fs = require('fs');
+const dgram = require('dgram');
 
 const app = express();
 const server = http.createServer(app);
@@ -56,6 +57,7 @@ let artnetSenders = [];
 let sacnSender = null;
 let activeArtnetReceivers = [];
 let activeSacnReceivers = [];
+let ARTNET_AVAILABLE = true;
 
 // ==========================================
 // DMX CORE PROCESSING & ROUTING MATRIX
@@ -74,14 +76,22 @@ function initDMXCore() {
     }
 
     // 2. Spin up fresh protocol engine instances
-    artnetEngine = new dmxnet({ log: { level: 'error' }, sane_sender: true });
-    if (CONFIG.output.protocol === 'sacn') {
+    if (ARTNET_AVAILABLE) {
+        try {
+            artnetEngine = new dmxnet({ log: { level: 'error' }, sane_sender: true });
+        } catch (e) {
+            console.error("Failed to start dmxnet engine:", e);
+            ARTNET_AVAILABLE = false;
+        }
+    }
+
+    if (CONFIG.output.protocol === 'sacn' || (!ARTNET_AVAILABLE && CONFIG.output.protocol === 'artnet')) {
         sacnSender = new sacn.Sender({ universe: parseInt(CONFIG.output.sacn.universe) });
     }
 
     // 3. Configure Output Art-Net Sender destinations
     artnetSenders = [];
-    if (CONFIG.output.protocol === 'artnet') {
+    if (CONFIG.output.protocol === 'artnet' && ARTNET_AVAILABLE) {
         if (CONFIG.output.artnet.target_type === 'all') {
             // Broadcast on all available network interfaces
             if (artnetEngine.ip4 && artnetEngine.ip4.length > 0) {
@@ -119,15 +129,19 @@ function setupInputStream(inputConfig, targetBuffer) {
     const targetUniverse = parseInt(inputConfig.universe);
 
     if (inputConfig.protocol === 'artnet') {
-        const rx = artnetEngine.newReceiver({ universe: targetUniverse });
-        rx.on('data', (data) => {
-            console.log("Received Art-Net data on universe " + targetUniverse);
-            for(let i = 0; i < Math.min(data.length, 512); i++) {
-                targetBuffer[i] = data[i];
-            }
-            processAndTransmit();
-        });
-        activeArtnetReceivers.push(rx);
+        if (ARTNET_AVAILABLE && artnetEngine) {
+            const rx = artnetEngine.newReceiver({ universe: targetUniverse });
+            rx.on('data', (data) => {
+                console.log("Received Art-Net data on universe " + targetUniverse);
+                for(let i = 0; i < Math.min(data.length, 512); i++) {
+                    targetBuffer[i] = data[i];
+                }
+                processAndTransmit();
+            });
+            activeArtnetReceivers.push(rx);
+        } else {
+            console.warn("Art-Net input configured but port is unavailable. Ignoring input.");
+        }
     } else if (inputConfig.protocol === 'sacn') {
         // Instantiate passing options block wrapper to satisfy destructuring contract
         const rx = new sacn.Receiver({ universes: [targetUniverse], reuseAddr: true });
@@ -155,9 +169,9 @@ function processAndTransmit() {
     const outputArray = Array.from(mergedData);
 
     // Sync out to targets
-    if (CONFIG.output.protocol === 'artnet') {
+    if (CONFIG.output.protocol === 'artnet' && ARTNET_AVAILABLE) {
         artnetSenders.forEach(sender => sender.transmit(outputArray));
-    } else if (CONFIG.output.protocol === 'sacn' && sacnSender) {
+    } else if ((CONFIG.output.protocol === 'sacn' || !ARTNET_AVAILABLE) && sacnSender) {
         sacnSender.send({
             universe: parseInt(CONFIG.output.sacn.universe),
             payload: outputArray,
@@ -166,14 +180,47 @@ function processAndTransmit() {
     }
 }
 
-// Kick off initial matrix state
-initDMXCore();
+// Check UDP Port 6454 for ArtNet Availability before starting
+function checkArtNetPort(callback) {
+    const testSocket = dgram.createSocket('udp4');
+    testSocket.once('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+            console.error("Art-Net port 6454 is already in use by another application.");
+            ARTNET_AVAILABLE = false;
+        }
+        testSocket.close();
+        callback();
+    });
+    testSocket.once('listening', () => {
+        // Port is free
+        ARTNET_AVAILABLE = true;
+        testSocket.close();
+        callback();
+    });
+    testSocket.bind(6454);
+}
+
+// Kick off initial matrix state after port check
+checkArtNetPort(() => {
+    if (!ARTNET_AVAILABLE) {
+        // Force fallback if startup config uses ArtNet
+        if (CONFIG.output.protocol === 'artnet') {
+            CONFIG.output.protocol = 'sacn';
+        }
+    }
+    initDMXCore();
+
+    server.listen(PORT, () => {
+        console.log(`🌐 Matrix Engine Control UI running at http://localhost:${PORT}`);
+    });
+});
 
 // ==========================================
 // SOCKET.IO CONTROL PIPE
 // ==========================================
 io.on('connection', (socket) => {
     // Deliver baseline current config to new dashboard client
+    socket.emit('systemState', { artnetAvailable: ARTNET_AVAILABLE });
     socket.emit('currentConfig', CONFIG);
 
     // Process real-time update requests submitted from UI
@@ -219,8 +266,4 @@ io.on('connection', (socket) => {
         // Push state update verification globally to all clients
         io.emit('currentConfig', CONFIG);
     });
-});
-
-server.listen(PORT, () => {
-    console.log(`🌐 Matrix Engine Control UI running at http://localhost:${PORT}`);
 });
