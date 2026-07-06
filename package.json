@@ -13,14 +13,26 @@
   "license": "ISC",
   "author": "",
   "type": "commonjs",
-  "main": "index.js",
+  "main": "main.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "electron .",
+    "build:mac": "electron-builder --mac"
   },
   "dependencies": {
     "dmxnet": "^0.9.0",
     "express": "^5.2.1",
     "sacn": "^4.6.2",
     "socket.io": "^4.8.3"
+  },
+  "build": {
+    "appId": "com.cju-media.dmxcombiner",
+    "productName": "DMX Combiner",
+    "mac": {
+      "category": "public.app-category.utilities"
+    },
+    "directories": {
+      "buildResources": "build"
+    }
   }
 }

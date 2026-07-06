@@ -20,6 +20,7 @@
         button:hover { background: #1d4ed8; }
         .status { font-size: 0.85rem; color: #10b981; display: inline-flex; align-items: center; gap: 0.35rem; margin-left: auto; }
         .header-wrap { display: flex; align-items: center; }
+        #errorBox { background: #ef4444; color: white; padding: 1rem; border-radius: 4px; margin-bottom: 1.5rem; display: none; font-weight: 500; }
     </style>
 </head>
 <body>
@@ -28,6 +29,8 @@
             <h1>🎛️ DMX Matrix Matrix / Merger</h1>
             <div class="status">● System Live</div>
         </div>
+
+        <div id="errorBox"></div>
 
         <form id="configForm">
             <div class="grid">
@@ -74,6 +77,13 @@
                         <div>
                             <label style="color: #ec4899;">Art-Net Settings</label>
                             <div class="form-group" style="margin-top:0.5rem;">
+                                <label>Target Destination</label>
+                                <select id="output_artnet_target_type">
+                                    <option value="specific">Specific IP Address</option>
+                                    <option value="all">All Networks (Broadcast)</option>
+                                </select>
+                            </div>
+                            <div class="form-group" id="output_artnet_ip_group">
                                 <label>IP Target Address</label>
                                 <input type="text" id="output_artnet_ip">
                             </div>
@@ -111,23 +121,54 @@
             'inputB.protocol': document.getElementById('inputB_protocol'),
             'inputB.universe': document.getElementById('inputB_universe'),
             'output.sacn.universe': document.getElementById('output_sacn_universe'),
+            'output.artnet.target_type': document.getElementById('output_artnet_target_type'),
             'output.artnet.ip': document.getElementById('output_artnet_ip'),
             'output.artnet.net': document.getElementById('output_artnet_net'),
             'output.artnet.subnet': document.getElementById('output_artnet_subnet'),
             'output.artnet.universe': document.getElementById('output_artnet_universe'),
         };
 
+        const artnetIpGroup = document.getElementById('output_artnet_ip_group');
+        fields['output.artnet.target_type'].addEventListener('change', (e) => {
+            if (e.target.value === 'all') {
+                artnetIpGroup.style.display = 'none';
+            } else {
+                artnetIpGroup.style.display = 'block';
+            }
+        });
+
         // Populate fields with active state when page loads
         socket.on('currentConfig', (config) => {
+            const errorBox = document.getElementById('errorBox');
+            if (errorBox) errorBox.style.display = 'none';
             fields['inputA.protocol'].value = config.inputA.protocol;
             fields['inputA.universe'].value = config.inputA.universe;
             fields['inputB.protocol'].value = config.inputB.protocol;
             fields['inputB.universe'].value = config.inputB.universe;
             fields['output.sacn.universe'].value = config.output.sacn.universe;
+
+            const targetType = config.output.artnet.target_type || 'specific';
+            fields['output.artnet.target_type'].value = targetType;
+            if (targetType === 'all') {
+                artnetIpGroup.style.display = 'none';
+            } else {
+                artnetIpGroup.style.display = 'block';
+            }
+
             fields['output.artnet.ip'].value = config.output.artnet.ip;
             fields['output.artnet.net'].value = config.output.artnet.net;
             fields['output.artnet.subnet'].value = config.output.artnet.subnet;
             fields['output.artnet.universe'].value = config.output.artnet.universe;
+        });
+
+        socket.on('configError', (errorMsg) => {
+            const errorBox = document.getElementById('errorBox');
+            if (errorBox) {
+                errorBox.textContent = errorMsg;
+                errorBox.style.display = 'block';
+            } else {
+                alert(errorMsg);
+            }
         });
 
         // Pack and ship changes upstream
@@ -147,6 +188,7 @@
                         universe: parseInt(fields['output.sacn.universe'].value)
                     },
                     artnet: {
+                        target_type: fields['output.artnet.target_type'].value,
                         ip: fields['output.artnet.ip'].value,
                         net: parseInt(fields['output.artnet.net'].value),
                         subnet: parseInt(fields['output.artnet.subnet'].value),

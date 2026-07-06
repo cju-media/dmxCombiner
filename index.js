@@ -4,6 +4,7 @@ const { Server } = require('socket.io');
 const { dmxnet } = require('dmxnet');
 const sacn = require('sacn');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
@@ -16,21 +17,34 @@ app.use(express.static(path.join(__dirname, 'public')));
 // ==========================================
 // STATE MANAGEMENT & DATA BUFFERS
 // ==========================================
+const CONFIG_FILE = path.join(__dirname, 'config.json');
+
 let CONFIG = {
     inputA: { protocol: 'sacn', universe: 1 },
     inputB: { protocol: 'artnet', universe: 2 },
     output: {
-        artnet: { net: 0, subnet: 0, universe: 0, ip: '255.255.255.255' },
+        artnet: { target_type: 'specific', net: 0, subnet: 0, universe: 0, ip: '255.255.255.255' },
         sacn: { universe: 1 }
     }
 };
+
+// Load saved config on boot
+try {
+    if (fs.existsSync(CONFIG_FILE)) {
+        const savedConfig = fs.readFileSync(CONFIG_FILE, 'utf8');
+        CONFIG = { ...CONFIG, ...JSON.parse(savedConfig) };
+        console.log('✅ Loaded saved configuration from config.json');
+    }
+} catch (err) {
+    console.error('Error reading config.json, using defaults:', err);
+}
 
 let bufferA = new Uint8Array(512);
 let bufferB = new Uint8Array(512);
 
 // Engine and dynamic socket references
 let artnetEngine = null;
-let artnetSender = null;
+let artnetSenders = [];
 let sacnSender = null;
 let activeArtnetReceivers = [];
 let activeSacnReceivers = [];
@@ -55,13 +69,29 @@ function initDMXCore() {
     artnetEngine = new dmxnet({ log: { level: 'error' }, sane_sender: true });
     sacnSender = new sacn.Sender({ universe: parseInt(CONFIG.output.sacn.universe) });
 
-    // 3. Configure Output Art-Net Sender destination
-    artnetSender = artnetEngine.newSender({
-        ip: CONFIG.output.artnet.ip,
-        net: parseInt(CONFIG.output.artnet.net),
-        subnet: parseInt(CONFIG.output.artnet.subnet),
-        universe: parseInt(CONFIG.output.artnet.universe)
-    });
+    // 3. Configure Output Art-Net Sender destinations
+    artnetSenders = [];
+    if (CONFIG.output.artnet.target_type === 'all') {
+        // Broadcast on all available network interfaces
+        if (artnetEngine.ip4 && artnetEngine.ip4.length > 0) {
+            artnetEngine.ip4.forEach(interfaceInfo => {
+                artnetSenders.push(artnetEngine.newSender({
+                    ip: interfaceInfo.broadcast,
+                    net: parseInt(CONFIG.output.artnet.net),
+                    subnet: parseInt(CONFIG.output.artnet.subnet),
+                    universe: parseInt(CONFIG.output.artnet.universe)
+                }));
+            });
+        }
+    } else {
+        // Specific IP Target
+        artnetSenders.push(artnetEngine.newSender({
+            ip: CONFIG.output.artnet.ip,
+            net: parseInt(CONFIG.output.artnet.net),
+            subnet: parseInt(CONFIG.output.artnet.subnet),
+            universe: parseInt(CONFIG.output.artnet.universe)
+        }));
+    }
 
     // 4. Bind decoupled Input Streams
     setupInputStream(CONFIG.inputA, bufferA);
@@ -106,7 +136,7 @@ function processAndTransmit() {
     const outputArray = Array.from(mergedData);
 
     // Sync out to targets
-    if (artnetSender) artnetSender.transmit(outputArray);
+    artnetSenders.forEach(sender => sender.transmit(outputArray));
     if (sacnSender) {
         sacnSender.send({
             universe: parseInt(CONFIG.output.sacn.universe),
@@ -128,8 +158,38 @@ io.on('connection', (socket) => {
 
     // Process real-time update requests submitted from UI
     socket.on('updateConfig', (newConfig) => {
+        // Server-side validation to avoid feedback loops
+        const isLoop = (input) => {
+            const inUniv = parseInt(input.universe, 10);
+            if (input.protocol === 'sacn' && parseInt(newConfig.output.sacn.universe, 10) === inUniv) {
+                return true;
+            }
+            if (input.protocol === 'artnet' &&
+                parseInt(newConfig.output.artnet.universe, 10) === inUniv &&
+                parseInt(newConfig.output.artnet.subnet, 10) === 0 &&
+                parseInt(newConfig.output.artnet.net, 10) === 0) {
+                return true;
+            }
+            return false;
+        };
+
+        if (isLoop(newConfig.inputA)) {
+            socket.emit('configError', "Error: Input A creates a feedback loop with Output.");
+            return;
+        }
+
+        if (isLoop(newConfig.inputB)) {
+            socket.emit('configError', "Error: Input B creates a feedback loop with Output.");
+            return;
+        }
+
         console.log('🔄 Reloading Core Routing Engines Matrix...');
         CONFIG = newConfig;
+
+        // Persist config invisibly to the user
+        fs.writeFile(CONFIG_FILE, JSON.stringify(CONFIG, null, 4), (err) => {
+            if (err) console.error('Failed to save config.json:', err);
+        });
         
         // Dynamic re-binding execution
         initDMXCore();
