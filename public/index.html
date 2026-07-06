@@ -41,6 +41,7 @@
                         <select id="inputA_protocol">
                             <option value="sacn">sACN (E1.31)</option>
                             <option value="artnet">Art-Net</option>
+                            <option value="off">Off</option>
                         </select>
                     </div>
                     <div class="form-group">
@@ -56,6 +57,7 @@
                         <select id="inputB_protocol">
                             <option value="sacn">sACN (E1.31)</option>
                             <option value="artnet">Art-Net</option>
+                            <option value="off">Off</option>
                         </select>
                     </div>
                     <div class="form-group">
@@ -65,16 +67,23 @@
                 </div>
 
                 <div class="card full-width">
-                    <div class="card-title">Output Destinations (Simultaneous)</div>
-                    <div class="grid" style="margin-bottom: 0; padding: 0;">
-                        <div>
+                    <div class="card-title">Output Destination</div>
+                    <div class="form-group">
+                        <label>Protocol</label>
+                        <select id="output_protocol">
+                            <option value="artnet">Art-Net</option>
+                            <option value="sacn">sACN (E1.31)</option>
+                        </select>
+                    </div>
+                    <div style="margin-bottom: 0; padding: 0;">
+                        <div id="output_sacn_group" style="display: none;">
                             <label style="color: #3b82f6;">sACN Settings</label>
                             <div class="form-group" style="margin-top:0.5rem;">
                                 <label>Universe</label>
                                 <input type="number" id="output_sacn_universe" min="1">
                             </div>
                         </div>
-                        <div>
+                        <div id="output_artnet_group">
                             <label style="color: #ec4899;">Art-Net Settings</label>
                             <div class="form-group" style="margin-top:0.5rem;">
                                 <label>Target Destination</label>
@@ -120,6 +129,7 @@
             'inputA.universe': document.getElementById('inputA_universe'),
             'inputB.protocol': document.getElementById('inputB_protocol'),
             'inputB.universe': document.getElementById('inputB_universe'),
+            'output.protocol': document.getElementById('output_protocol'),
             'output.sacn.universe': document.getElementById('output_sacn_universe'),
             'output.artnet.target_type': document.getElementById('output_artnet_target_type'),
             'output.artnet.ip': document.getElementById('output_artnet_ip'),
@@ -137,6 +147,19 @@
             }
         });
 
+        const outputSacnGroup = document.getElementById('output_sacn_group');
+        const outputArtnetGroup = document.getElementById('output_artnet_group');
+
+        fields['output.protocol'].addEventListener('change', (e) => {
+            if (e.target.value === 'sacn') {
+                outputSacnGroup.style.display = 'block';
+                outputArtnetGroup.style.display = 'none';
+            } else {
+                outputSacnGroup.style.display = 'none';
+                outputArtnetGroup.style.display = 'block';
+            }
+        });
+
         // Populate fields with active state when page loads
         socket.on('currentConfig', (config) => {
             const errorBox = document.getElementById('errorBox');
@@ -145,6 +168,11 @@
             fields['inputA.universe'].value = config.inputA.universe;
             fields['inputB.protocol'].value = config.inputB.protocol;
             fields['inputB.universe'].value = config.inputB.universe;
+            fields['output.protocol'].value = config.output.protocol || 'artnet';
+
+            // Trigger change event to update display of protocol-specific groups
+            fields['output.protocol'].dispatchEvent(new Event('change'));
+
             fields['output.sacn.universe'].value = config.output.sacn.universe;
 
             const targetType = config.output.artnet.target_type || 'specific';
@@ -184,6 +212,7 @@
                     universe: parseInt(fields['inputB.universe'].value)
                 },
                 output: {
+                    protocol: fields['output.protocol'].value,
                     sacn: {
                         universe: parseInt(fields['output.sacn.universe'].value)
                     },
